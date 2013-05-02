@@ -148,6 +148,52 @@ namespace PINQ.Streaming
 		}
 	}
 
+	public class FunctionStream<T> : StreamingDataSource<T>
+	{
+		private Func<int, T> func;
+		private int sleepMs;
+		private Thread thread;
+		private bool running;
+		private int i;
+		public FunctionStream(int sleepMs, Func<int, T> func)
+		{
+			this.sleepMs = sleepMs;
+			this.func = func;
+			thread = new Thread(Run);
+			i = 0;
+			running = true;
+			thread.Start();
+		}
+
+		public void Run()
+		{
+			while (running)
+			{
+				if (EventReceived != null)
+				{
+					EventReceived(func(i++));
+				}
+				try
+				{
+					Thread.Sleep(sleepMs);
+				} 
+				catch (ThreadInterruptedException)
+				{
+				}
+			}
+		}
+		
+		public override void Stop ()
+		{
+			if (thread.IsAlive)
+			{
+				running = false;
+				thread.Interrupt();
+				thread.Join();
+			}
+		}
+	}
+
 	public class RandomNumbers : StreamingDataSource<Double>
 	{
 		protected static Random random = new Random();
@@ -156,7 +202,7 @@ namespace PINQ.Streaming
 		private double high;
 		private int sleepMs;
 		private Thread thread;
-		private Boolean running;
+		private bool running;
 		public RandomNumbers(double low, double high, int sleepMs)
 		{
 			this.low = low;
@@ -253,6 +299,8 @@ namespace PINQ.Streaming
 		private StreamingDataSource<T> data;
 		private PINQStreamingAgent agent;
 		private List<StreamingAlgorithm<T>> activeAlgorithms;
+		private List<StreamingAlgorithm<T>> toRemove;
+		private bool processing;
 
 		public StreamingQueryable(StreamingDataSource<T> data, PINQStreamingAgent agent)
 		{
@@ -260,6 +308,7 @@ namespace PINQ.Streaming
 			this.agent = agent;
 			this.activeAlgorithms = new List<StreamingAlgorithm<T>>();
 			data.EventReceived += eventReceived;
+			toRemove = new List<StreamingAlgorithm<T>>();
 		}
 
 		public StreamingQueryable<T> Where(Expression<Func<T, bool>> predicate)
@@ -297,7 +346,10 @@ namespace PINQ.Streaming
 					agent.UnapplyUserLevel(alg.Epsilon);
 				} // otherwise, we will unapply after we receive the data
 
-				activeAlgorithms.Remove(alg);
+				if (processing)
+					toRemove.Add(alg);
+				else
+					activeAlgorithms.Remove(alg);
 			}
 		}
 
@@ -305,6 +357,7 @@ namespace PINQ.Streaming
 		{
 			lock(this)
 			{
+				processing = true;
 				applyEventLevelAlgorithms();
 
 				foreach (StreamingAlgorithm<T> alg in activeAlgorithms)
@@ -313,6 +366,9 @@ namespace PINQ.Streaming
 				}
 
 				unapplyEventLevelAlgorithms();
+				processing = false;
+				activeAlgorithms.RemoveAll(alg => toRemove.Contains(alg));
+				toRemove.Clear();
 			}
 		}
 
@@ -352,7 +408,17 @@ namespace PINQ.Streaming
 		{
 			return new RandomizedResponseCount<T>(this, epsilon);
 		}
-		
+
+		public StreamingEventAlgorithm<T> BinaryCount(double epsilon, int maxT)
+		{
+			return new BinaryCount<T>(this, epsilon, maxT);
+		}
+
+		public UserDensity<T> UserDensity(double epsilon, List<T> universe, double accuracy, double confidence = 0.90) 
+		{
+			return new UserDensity<T>(this, epsilon, universe, accuracy, confidence);
+		}
+
 		#endregion 
 
 	}
@@ -444,6 +510,16 @@ namespace PINQ.Streaming
 		{
 			EventsSeen++;
 		}
+
+		protected int IncrementValue(T input)
+		{
+			int increment = 0;
+			if (!default(T).Equals(input))
+			{
+				increment = 1;
+			}
+			return increment;
+		}
 		
 	}
 
@@ -512,14 +588,9 @@ namespace PINQ.Streaming
 		public override void EventReceived (T data)
 		{
 			base.EventReceived (data);
-
-			double increment = 0.0;
-			if (!default(T).Equals(data))
-			{
-				increment = 1.0;
-			}
+			double increment = IncrementValue(data);
 			LastOutput += increment + Laplace(1.0 / Epsilon);
-
+			
 			if (OnOutput != null)
 			{
 				OnOutput(LastOutput.Value);
@@ -532,30 +603,126 @@ namespace PINQ.Streaming
 	public class BinaryCount<T> : StreamingEventAlgorithm<T>
 	{
 		private int maxSteps = 0;
+		private double internalEpsilon;
+		private int logT;
+		private int[] partialSums;
+		private double[] noisyPartialSums;
 		public BinaryCount(StreamingQueryable<T> s, double epsilon, int maxSteps) : base(s, epsilon)
 		{
 			this.maxSteps = maxSteps;
-			//LastOutput = Laplace(1.0 / Epsilon);
+			logT = Convert.ToInt32(Math.Log(maxSteps, 2) + 0.5);
+			internalEpsilon = epsilon / (double)logT;
+			LastOutput = Laplace(1.0 / Epsilon);
+			partialSums = new int[logT];
+			noisyPartialSums = new double[logT];
 		}
 
 		public override void EventReceived (T data)
 		{
 			base.EventReceived (data);
-			
-			double increment = 0.0;
-			if (!default(T).Equals(data))
+			if (EventsSeen > maxSteps)
 			{
-				increment = 1.0;
+				StopReceiving();
+				return;
 			}
-			LastOutput += increment + Laplace(1.0 / Epsilon);
-			
+
+			int val = IncrementValue(data);
+			//Console.Write("val = " + val + " ");
+
+			int[] tBinary = Convert.ToString(EventsSeen, 2).PadLeft(logT, '0').ToCharArray().Select(c => c == '0' ? 0 : 1).ToArray();
+			//Console.Write(string.Join("", tBinary.Select(s => s.ToString()).ToArray()));
+			int i = logT - 1;
+			while (i > 0 && tBinary[i] == 0) i--;
+			i = logT - i - 1;
+			//Console.Write(" i = " + i);
+
+			partialSums[i] = val;
+			for (int j = 0; j < i; j++)
+			{
+				partialSums[i] += partialSums[j];
+				partialSums[j] = 0;
+				noisyPartialSums[j] = 0;
+			}
+
+			noisyPartialSums[i] = partialSums[i] + Laplace(1.0 / internalEpsilon);
+
+			//Console.WriteLine(" partial sums: " + string.Join(", ", partialSums.Select(n => n.ToString()).ToArray()));
+
+			LastOutput = 0;
+			for (int c = 0; c < logT; c++)
+			{
+				if (tBinary[c] != 0)
+					LastOutput += noisyPartialSums[logT - c - 1];
+			}
+
+
 			if (OnOutput != null)
 			{
 				OnOutput(LastOutput.Value);
 			}
+
+			signalEndProcessed();
+		}
+	}
+
+	public class UserDensity<T> : StreamingUserAlgorithm<T>
+	{
+		private Dictionary<T, bool> sampled;
+
+		public UserDensity(StreamingQueryable<T> s, double epsilon, List<T> universe, double accuracy, double confidence) 
+			: base(s, epsilon)
+		{
+			if (epsilon > 0.5)
+			{
+				throw new Exception("epsilon too high");
+			}
+			double beta = 1.0 - confidence;
+			int size = Convert.ToInt32((200 * Math.Log(1.0 / beta, 2)) / (epsilon * epsilon * accuracy * accuracy));
+			size = Math.Min (universe.Count, size);
+			IEnumerable<T> sample = universe.OrderBy(x => random.Next()).Take(size);
+			sampled = new Dictionary<T, bool>(size);
+			foreach (T item in sample)
+			{
+				sampled[item] = sampleInitial();
+			}
+		}
+
+		public override void EventReceived (T data)
+		{
+			base.EventReceived (data);
+
+			if (sampled.ContainsKey(data))
+			{
+				sampled[data] = sampleChosen();
+			}
 			
 			signalEndProcessed();
 		}
+
+		public override double GetOutput ()
+		{
+			StopReceiving();
+			if (LastOutput.HasValue)
+				return LastOutput.Value;
+
+			double density = sampled.Values.Sum(b => b ? 1 : 0) / (double)sampled.Count;
+			LastOutput = 4 * (density - 0.5) / Epsilon + Laplace(1.0 / (Epsilon * sampled.Count));
+
+			return LastOutput.Value;
+
+		}
+
+		private bool sampleInitial()
+		{
+			return random.NextDouble() <= 0.5;
+		}
+
+		private bool sampleChosen()
+		{
+			return random.NextDouble() <= 0.5 + (Epsilon/4);
+		}
+
+		public int SampleSize { get { return sampled.Count; } }
 	}
 }
 
