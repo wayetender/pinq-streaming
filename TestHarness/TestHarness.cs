@@ -1,0 +1,79 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+
+using PINQ;
+using PINQ.Streaming;
+using System.IO;
+
+namespace TestHarness
+{
+    public class TestHarness
+    {
+        public class PINQAgentLogger : PINQAgent
+        {
+            string name;
+            double total;
+            public override bool apply(double epsilon)
+            {
+                total += epsilon;
+                Console.WriteLine("**privacy change**\tdelta: " + epsilon.ToString("0.00") + "\ttotal: " + total.ToString("0.00") + "\t(" + name + ")");
+                //Console.WriteLine("**privacy change**\tdelta: {0:F2}\ttotal: {1:F2}\t({2})", epsilon, total, name);
+
+                return true;
+            }
+
+            public PINQAgentLogger(string n) { name = n; }
+        }
+
+        static void Main(string[] args)
+        {
+
+			var privateNumbers = new RandomNumbers(0, 1, 10); //.filter(n => n > 5).map(n => n*2);
+			var numbers = new StreamingQueryable<double>(privateNumbers, new PINQEventLevelAgent(100.0));
+			var overHalf = numbers.Where(x => x <= 0.2);
+
+			var avg = numbers.NoisyAverage(1.0, x => x);
+			avg.ProcessEvents(50);
+			Console.WriteLine("Got noisy average after " + avg.EventsSeen + " events seen: " + avg.GetOutput());
+
+			var count = overHalf.RandomizedResponseCount(100.0);
+			count.OnOutput = (countSoFar => Console.WriteLine("Count: " + countSoFar + " Events seen: " + count.EventsSeen));
+			count.ProcessEvents(100);
+			Console.WriteLine("Got " + count.GetOutput() + " numbers <= 0.2 after seeing " + count.EventsSeen + " events");
+
+
+			privateNumbers.Stop();
+
+
+            // preparing a private data source
+//            var filename = @"../../TestHarness.cs";
+//            var data = File.ReadAllLines(filename).AsQueryable();
+//            var text = new PINQueryable<string>(data, new PINQAgentLogger(filename));
+//
+//            /**** Data is now sealed up. Use from this point on is unrestricted ****/
+//
+//            // output a noisy count of the number of lines of text
+//
+//            Console.WriteLine("Lines of text: " + text.NoisyCount(1.0));
+//			Console.WriteLine("Lines of text (2): " + text.NoisyCount(1.0));
+//
+//            // restrict using a user defined predicate, and count again (with noise)
+//            Console.WriteLine("Lines with semi-colons: " + text.Where(line => line.Contains(';')).NoisyCount(1.0));
+//
+//            // think about splitting the records into arrays (declarative, so nothing happens yet)
+//            var words = text.Select(line => line.Split(' '));
+//
+//            // partition the data by number of "words", and count how many of each type there are
+//            var keys = new int[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+//            var parts = words.Partition(keys, line => line.Count());
+//            foreach (var count in keys)
+//                Console.WriteLine("Lines with " + count + " words:" + "\t" + parts[count].NoisyCount(0.1));
+//
+//			Console.WriteLine("Super specific query: " + text.Where(line => line.Contains("var words = text.Select(line => line.Split(' '));")).NoisyCount(1.0));
+//
+//            Console.ReadKey();
+       }
+    }
+}
