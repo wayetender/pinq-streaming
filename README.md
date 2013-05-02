@@ -1,4 +1,5 @@
-ping-streaming
+PINQ Streaming
 ==============
 
-PINQ Streaming Algorithms
+Extension to PINQ libraries to support streaming algorithms.
+
