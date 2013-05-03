@@ -14,17 +14,22 @@ namespace PINQ.Streaming
 
 	public abstract class PINQStreamingAgent : PINQAgent
 	{
+		public abstract bool ApplyEventLevel(double epsilon);
+		public abstract double UnapplyEventLevel(double epsilon);
+		public abstract bool ApplyUserLevel(double epsilon);
+		public abstract double UnapplyUserLevel(double epsilon);
+	}
+
+	public abstract class PINQStreamingAgentBudget : PINQStreamingAgent
+	{
 		private double budget;
 		private double originalBudget;
-		public PINQStreamingAgent(double budget)
+		public PINQStreamingAgentBudget(double budget)
 		{
 			this.budget = budget;
 			this.originalBudget = budget;
 		}
-		public abstract bool ApplyEventLevel(double epsilon);
-		public abstract void UnapplyEventLevel(double epsilon);
-		public abstract bool ApplyUserLevel(double epsilon);
-		public abstract void UnapplyUserLevel(double epsilon);
+
 		public override bool apply (double epsilon)
 		{
 			if (epsilon > budget)
@@ -43,9 +48,9 @@ namespace PINQ.Streaming
 		}
 	}
 
-	public class PINQEventLevelAgent : PINQStreamingAgent
+	public class PINQEventLevelAgentBudget : PINQStreamingAgentBudget
 	{
-		public PINQEventLevelAgent(double budget) : base(budget)
+		public PINQEventLevelAgentBudget(double budget) : base(budget)
 		{
 		}
 
@@ -57,19 +62,22 @@ namespace PINQ.Streaming
 		{
 			return apply(epsilon);
 		}
-		public override void UnapplyEventLevel(double epsilon)
+		public override double UnapplyEventLevel(double epsilon)
 		{
 			unapply(epsilon);
+			return epsilon;
 		}
-		public override void UnapplyUserLevel(double epsilon)
+		public override double UnapplyUserLevel(double epsilon)
 		{
 			unapply(epsilon);
+			return epsilon;
+
 		}
 	}
 
-	public class PINQUserLevelAgent : PINQStreamingAgent
+	public class PINQUserLevelAgentBudget : PINQStreamingAgentBudget
 	{
-		public PINQUserLevelAgent(double budget) : base(budget)
+		public PINQUserLevelAgentBudget(double budget) : base(budget)
 		{
 		}
 		
@@ -81,13 +89,88 @@ namespace PINQ.Streaming
 		{
 			return apply(epsilon);
 		}
-		public override void UnapplyEventLevel(double epsilon)
+		public override double UnapplyEventLevel(double epsilon)
 		{
 			// Do nothing, the budget is gone
+			return 0.0;
 		}
-		public override void UnapplyUserLevel(double epsilon)
+		public override double UnapplyUserLevel(double epsilon)
 		{
 			// Do nothing, the budget is gone
+			return 0.0;
+		}
+	}
+
+	public class PINQStreamingAgentPartition<K> : PINQStreamingAgent
+	{
+		private PINQStreamingAgent target;
+		private double[] maximum; 
+		private Dictionary<K, double> table;
+		private K key;
+
+		public override bool ApplyEventLevel(double epsilon)
+		{
+			return apply(epsilon);
+		}
+		public override bool ApplyUserLevel(double epsilon)
+		{
+			return apply(epsilon);
+		}
+		public override double UnapplyEventLevel(double epsilon)
+		{
+			double res = target.UnapplyEventLevel(epsilon);
+			table[key] -= res;
+			maximum[0] = table.Values.Max();
+			return res;
+		}
+		public override double UnapplyUserLevel(double epsilon)
+		{
+			double res = target.UnapplyUserLevel(epsilon);
+			table[key] -= res;
+			maximum[0] = table.Values.Max();
+			return res;
+		}
+
+		public override bool apply(double epsilon)
+		{
+			// if we increment the maximum, test and update
+			if (table[key] + epsilon > maximum[0])
+			{
+				if (target.apply((table[key] + epsilon) - maximum[0]))
+				{
+					table[key] += epsilon;
+					maximum[0] = table[key];
+					return true;
+				}
+				
+				return false;
+			}
+			
+			// if we were the maximum, and we decrement, re-establish the maximum.
+			if (table[key] == maximum[0] && epsilon < 0.0)
+			{
+				table[key] += epsilon;
+				maximum[0] = table.Select(x => x.Value).Max();
+			}
+			else
+				table[key] += epsilon;
+			
+			return true;
+		}
+		
+		/// <summary>
+		/// Constructor for PINQStreamingAgentPartition
+		/// </summary>
+		/// <param name="t">Target PINQAgent</param>
+		/// <param name="tbl">Table of (key,epsilon) pairs</param>
+		/// <param name="k">Key associated with this agent</param>
+		/// <param name="m">Stores a shared maximum between all peers</param>
+		public PINQStreamingAgentPartition(PINQStreamingAgent t, Dictionary<K, double> tbl, K k, double[] m)
+		{
+			target = t;
+			table = tbl;
+			key = k;
+			maximum = m;
 		}
 	}
 
@@ -320,6 +403,28 @@ namespace PINQ.Streaming
 		{
 			return new StreamingQueryable<S>(data.map(selector.Compile()), agent);
 		}
+
+		public Dictionary<K, StreamingQueryable<T>> Partition<K>(K[] keys, Expression<Func<T, K>> keyFunc)
+		{
+			var agentTable = new Dictionary<K, double>();
+			foreach (K k in keys.Distinct<K>())
+				agentTable.Add(k, 0.0);
+
+			Func<T, K> matcher = keyFunc.Compile();
+
+			double[] maximum = new double[1] { 0.0 };
+
+			var resultTable = new Dictionary<K, StreamingQueryable<T>>();
+			foreach (K k in keys.Distinct())
+			{
+				Func<T, bool> matchesThisKey = item => k.Equals(matcher(item));
+				resultTable.Add(k, new StreamingQueryable<T>(data.filter(matchesThisKey), new PINQStreamingAgentPartition<K>(agent, agentTable, k, maximum)));
+			}
+			
+			return resultTable;
+		}
+
+
 
 		public void RegisterAlgorithm(StreamingAlgorithm<T> alg)
 		{
@@ -654,7 +759,10 @@ namespace PINQ.Streaming
 				noisyPartialSums[j] = 0;
 			}
 
-			noisyPartialSums[i] = partialSums[i] + Laplace(1.0 / internalEpsilon);
+
+			double noise = Laplace(1.0 / internalEpsilon);
+			Console.WriteLine("Internal eps: " + internalEpsilon + " Noise: " + noise);
+			noisyPartialSums[i] = partialSums[i] + noise;
 
 			//Console.WriteLine(" partial sums: " + string.Join(", ", partialSums.Select(n => n.ToString()).ToArray()));
 

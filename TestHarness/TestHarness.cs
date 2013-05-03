@@ -54,20 +54,36 @@ namespace TestHarness
 //			privateNumbers.Stop();
 //			constantYes.Stop();
 
-			var mod100 = new FunctionStream<int>(1, i => i % 99 + 1);
-			var stream = new StreamingQueryable<int>(mod100, new PINQUserLevelAgent(3.0));
-			var events = stream.RandomizedResponseCount(0.5);
-			events.ProcessEvents(4, true);
-			Console.WriteLine("processed " + events.EventsSeen);
+//			var mod100 = new FunctionStream<int>(1, i => i % 99 + 1);
+//			var stream = new StreamingQueryable<int>(mod100, new PINQUserLevelAgentBudget(3.0));
+//			var events = stream.RandomizedResponseCount(0.5);
+//			events.ProcessEvents(4, true);
+//			Console.WriteLine("processed " + events.EventsSeen);
+//
+//
+//			var alg = stream.UserDensityContinuous(0.5, Enumerable.Range(1, 1000).ToList(), 0.01, 2000);
+//			Console.WriteLine("Sample size: " + alg.SampleSize);
+//			alg.OnOutput = (density => Console.WriteLine("seen: " + alg.EventsSeen + " density so far: " + density));
+//			alg.ProcessEvents(2003);
+//			Console.WriteLine("User density: " + alg.GetOutput());
+//
+//			mod100.Stop();
 
 
-			var alg = stream.UserDensityContinuous(0.5, Enumerable.Range(1, 1000).ToList(), 0.01, 2000);
-			Console.WriteLine("Sample size: " + alg.SampleSize);
-			alg.OnOutput = (density => Console.WriteLine("seen: " + alg.EventsSeen + " density so far: " + density));
-			alg.ProcessEvents(2003);
-			Console.WriteLine("User density: " + alg.GetOutput());
 
-			mod100.Stop();
+			var source = new FunctionStream<int>(1, i => i % 10);
+			var zeroToNine = new StreamingQueryable<int>(source, new PINQEventLevelAgentBudget(3.0));
+			var buckets = zeroToNine.Partition(Enumerable.Range(0, 10).ToArray(), (i => i % 10));
+			var countsOnOne = buckets[1].BinaryCount(0.5, 10000);
+			var countsOnTwo = buckets[2].RandomizedResponseCount(0.5);
+			countsOnOne.OnOutput = cnt => Console.WriteLine("Events Seen: " + countsOnOne.EventsSeen + " Count for 1: " + cnt);
+			countsOnTwo.OnOutput = cnt => Console.WriteLine("Events Seen: " + countsOnTwo.EventsSeen + " Count for 2: " + cnt);
+			
+			countsOnOne.StartReceiving();
+			countsOnTwo.ProcessEvents(10000);
+			countsOnTwo.StopReceiving();
+
+
 //
 
             // preparing a private data source
