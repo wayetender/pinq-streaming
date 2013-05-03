@@ -454,7 +454,7 @@ namespace PINQ.Streaming
 
 		}
 
-		public void ProcessEvents(int n)
+		public void ProcessEvents(int n, bool stop = false)
 		{
 			if (!IsReceivingData)
 			{
@@ -471,6 +471,10 @@ namespace PINQ.Streaming
 				catch(ThreadInterruptedException)
 				{
 				}
+			}
+			if (stop)
+			{
+				StopReceiving();
 			}
 		}
 
@@ -498,6 +502,7 @@ namespace PINQ.Streaming
 		{
 			DataSource.UnregisterAlgorithm(this);
 			IsReceivingData = false;
+			signalEndProcessed();
 		}
 
 		protected double Laplace(double stddev)
@@ -739,6 +744,8 @@ namespace PINQ.Streaming
 		private double rho;
 		private int logT;
 
+		private int maxT;
+
 		private double[] thresholds;
 		private double epsilon_threshold;
 		private double epsilon_compare;
@@ -749,6 +756,7 @@ namespace PINQ.Streaming
 		public UserDensityContinuous(StreamingQueryable<T> s, double epsilon, List<T> universe, double accuracy, double confidence, int maxT) 
 			: base(s, epsilon, universe, accuracy, confidence)
 		{
+			this.maxT = maxT;
 			d = 1.0 / universe.Count + 2 * accuracy;
 			k = maxT;
 			rho = 1.0;
@@ -768,6 +776,13 @@ namespace PINQ.Streaming
 
 		public override void EventReceived (T data)
 		{
+			base.EventReceived (data);
+			if (EventsSeen > maxT)
+			{
+				StopReceiving();
+				return;
+			}
+
 			base.EventReceived(data);
 			double lastOutput = LastOutput.GetValueOrDefault(0.0);
 			double output = -1;
