@@ -54,12 +54,13 @@ namespace TestHarness
 //			privateNumbers.Stop();
 //			constantYes.Stop();
 
-			var mod100 = new FunctionStream<int>(1, i => i % 4000 + 1);
+			var mod100 = new FunctionStream<int>(1, i => i % 999 + 1);
 			var stream = new StreamingQueryable<int>(mod100, new PINQUserLevelAgent(1.0));
 
-			var alg = stream.UserDensity(0.5, Enumerable.Range(1, 10000).ToList(), 0.01);
+			var alg = stream.UserDensityContinuous(0.5, Enumerable.Range(1, 1000).ToList(), 0.01, 2000);
 			Console.WriteLine("Sample size: " + alg.SampleSize);
-			alg.ProcessEvents(5000);
+			alg.OnOutput = (density => Console.WriteLine("seen: " + alg.EventsSeen + " density so far: " + density));
+			alg.ProcessEvents(2000);
 			Console.WriteLine("User density: " + alg.GetOutput());
 
 			mod100.Stop();

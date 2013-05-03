@@ -419,6 +419,11 @@ namespace PINQ.Streaming
 			return new UserDensity<T>(this, epsilon, universe, accuracy, confidence);
 		}
 
+		public UserDensityContinuous<T> UserDensityContinuous(double epsilon, List<T> universe, double accuracy, int maxT, double confidence = 0.90)
+		{
+			return new UserDensityContinuous<T>(this, epsilon, universe, accuracy, confidence, maxT);
+		}
+
 		#endregion 
 
 	}
@@ -702,14 +707,16 @@ namespace PINQ.Streaming
 		public override double GetOutput ()
 		{
 			StopReceiving();
-			if (LastOutput.HasValue)
-				return LastOutput.Value;
-
-			double density = sampled.Values.Sum(b => b ? 1 : 0) / (double)sampled.Count;
-			LastOutput = 4 * (density - 0.5) / Epsilon + Laplace(1.0 / (Epsilon * sampled.Count));
+			if (!LastOutput.HasValue)
+				LastOutput = ComputeOutput();
 
 			return LastOutput.Value;
+		}
 
+		protected double ComputeOutput()
+		{
+			double density = sampled.Values.Sum(b => b ? 1 : 0) / (double)sampled.Count;
+			return 4 * (density - 0.5) / Epsilon + Laplace(1.0 / (Epsilon * sampled.Count));
 		}
 
 		private bool sampleInitial()
@@ -723,6 +730,93 @@ namespace PINQ.Streaming
 		}
 
 		public int SampleSize { get { return sampled.Count; } }
+	}
+
+	public class UserDensityContinuous<T> : UserDensity<T>
+	{
+		private int k;
+		private double d;
+		private double rho;
+		private int logT;
+
+		private double[] thresholds;
+		private double epsilon_threshold;
+		private double epsilon_compare;
+		private double epsilon_answer;
+		private double threshold;
+		private int m;
+
+		public UserDensityContinuous(StreamingQueryable<T> s, double epsilon, List<T> universe, double accuracy, double confidence, int maxT) 
+			: base(s, epsilon, universe, accuracy, confidence)
+		{
+			d = 1.0 / universe.Count + 2 * accuracy;
+			k = maxT;
+			rho = 1.0;
+			logT = Convert.ToInt32(Math.Log(maxT, 2) + 0.5);
+
+			epsilon_threshold = rho * logT / epsilon;
+			//Console.WriteLine("threshold: " + epsilon_threshold);
+			epsilon_compare = 2 * rho * (k + 1) / epsilon;
+			epsilon_answer = 2 * rho * (k + 1) / epsilon;
+			m = 0;
+
+			threshold = d + 2 * accuracy;
+
+			thresholds = new double[logT];
+
+		}
+
+		public override void EventReceived (T data)
+		{
+			base.EventReceived(data);
+			double lastOutput = LastOutput.GetValueOrDefault(0.0);
+			double output = -1;
+			double answer = ComputeOutput();
+
+
+			//I re-randomize every time... hit in accuracy, but still private
+			for (int i = 0; i < logT; i++)
+			{
+				thresholds[i] = Laplace(1.0 / epsilon_threshold);
+			}
+
+			double noise_compare = Laplace(1.0 / epsilon_compare);
+			double noise_answer = Laplace(1.0 / epsilon_answer);
+
+
+			double noisy_compare = Math.Abs(lastOutput - answer + noise_compare);
+			double thresh_t = threshold + thresholds.Sum();
+
+			//Console.Write ("threshold: " + thresh_t + " diff: " + noisy_compare + " ");
+
+			if (noisy_compare <= thresh_t)
+			{
+				output = lastOutput;
+			}
+			else
+			{
+				output = answer + noise_answer;
+				
+				if (m < k)
+				{
+					m++;
+				}
+				else
+				{
+					throw new Exception("algorithm not (k,d) varying");
+				}
+			}
+
+			LastOutput = output;
+
+			
+			if (OnOutput != null)
+			{
+				OnOutput(LastOutput.Value);
+			}
+			
+			signalEndProcessed();
+		}
 	}
 }
 
